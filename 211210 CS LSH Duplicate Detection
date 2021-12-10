@@ -1,0 +1,428 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Nov  1 16:23:18 2021
+
+Code for duplicate Detection using LSH and agglomerative clustering for Computer Science paper
+
+@author: martijnkorf
+"""
+
+import numpy as np
+import json
+import random
+import math
+import collections
+import itertools
+from sklearn.cluster import AgglomerativeClustering
+import re
+
+# import file
+f = open("/Users/martijnkorf/Desktop/BAQM Master/Block 2/Computer Science/TVs-all-merged.json")
+data = json.load(f)
+f.close()
+
+# create list with all different instances of TVs
+tvdata = [ data[key][i] for key in data.keys() for i in range(len(data[key]))]
+numTVs = len(tvdata)
+
+#-----------------------------------------------------------------------------
+# Data Cleaning
+#-----------------------------------------------------------------------------
+
+allkeys = set()
+for i in range(len(tvdata)):
+    newKeyValue = []
+    allkeys = set(tvdata[i]["featuresMap"].keys())
+    oldkeys = tvdata[i]["featuresMap"].keys()
+    for key in oldkeys:
+        if (key.replace(':','') != key):
+            newKey = key.replace(':','').lower()
+            value = tvdata[i]["featuresMap"][key].lower()
+            newKeyValue.append([key,newKey,value])
+            
+        elif (key.lower() != key):
+            newKey = key.lower()
+            value = tvdata[i]["featuresMap"][key].lower()
+            newKeyValue.append([key,newKey,value])
+    for j in range(len(newKeyValue)):
+        tvdata[i]["featuresMap"].pop(newKeyValue[j][0])
+        tvdata[i]["featuresMap"][newKeyValue[j][1]] = newKeyValue[j][2]
+
+# feature string not used in final implementation
+for i in range(len(tvdata)):
+    featureValues = ""
+    for key in tvdata[i]["featuresMap"].keys():
+        featureValue = str(tvdata[i]["featuresMap"][key])
+        
+        #featureValues += key.replace(' ', '') + ":" + featureValue.replace(' ', '-') + " "
+        featureValues += featureValue + " "
+    tvdata[i]["featuresString"] = featureValues
+
+aspect = ["title", "featuresString"]
+#clean data
+for i in range(len(tvdata)):
+    for s in range(2):
+        tvdata[i][aspect[s]] = tvdata[i][aspect[s]].replace('Best Buy', '')
+        tvdata[i][aspect[s]] = tvdata[i][aspect[s]].replace('Newegg.com', '')
+        tvdata[i][aspect[s]] = tvdata[i][aspect[s]].replace('TheNerds.net', '')
+        tvdata[i][aspect[s]] = tvdata[i][aspect[s]].lower()
+        tvdata[i][aspect[s]] = tvdata[i][aspect[s]].replace(' with ', '')
+        tvdata[i][aspect[s]] = tvdata[i][aspect[s]].replace(' and ', '')
+        tvdata[i][aspect[s]] = tvdata[i][aspect[s]].replace(' in ', '')
+        tvdata[i][aspect[s]] = tvdata[i][aspect[s]].replace(' of ', '')
+        tvdata[i][aspect[s]] = tvdata[i][aspect[s]].replace(' tv ', '')
+        tvdata[i][aspect[s]] = tvdata[i][aspect[s]].replace('led-lcd', 'ledlcd')
+        tvdata[i][aspect[s]] = tvdata[i][aspect[s]].replace(' " ', 'inch')
+        tvdata[i][aspect[s]] = tvdata[i][aspect[s]].replace('" ', 'inch')
+        tvdata[i][aspect[s]] = tvdata[i][aspect[s]].replace("'", 'inch')
+        tvdata[i][aspect[s]] = tvdata[i][aspect[s]].replace('-', '')
+        tvdata[i][aspect[s]] = tvdata[i][aspect[s]].replace('.', '')
+        tvdata[i][aspect[s]] = tvdata[i][aspect[s]].replace('-inch ', 'inch')
+        tvdata[i][aspect[s]] = tvdata[i][aspect[s]].replace('inchclass', 'inch')
+        tvdata[i][aspect[s]] = tvdata[i][aspect[s]].replace(' inch ', 'inch')
+        tvdata[i][aspect[s]] = tvdata[i][aspect[s]].replace('inch', 'inch ')
+        tvdata[i][aspect[s]] = re.sub('\W+',' ', tvdata[i][aspect[s]])
+        tvdata[i][aspect[s]] = tvdata[i][aspect[s]].replace(' hz', 'hz')
+        tvdata[i][aspect[s]] = tvdata[i][aspect[s]].replace(' inch ', 'inch')
+        tvdata[i][aspect[s]] = tvdata[i][aspect[s]].strip()
+    
+#-----------------------------------------------------------------------------
+# resampling method
+#-----------------------------------------------------------------------------
+
+def resample(tvdata: list):
+    # select 63% of indeces for training, rest for test
+    numTVs   = len(tvdata)
+    array    = [i for i in range(numTVs)]
+    trainObs = list(set(random.choices(array, k = numTVs)))
+    testObs  = set(array).difference(set(trainObs))
+    
+    # insert data from trainObs indeces and make list of true duplicates
+    tvdata_train = [tvdata[i] for i in set(trainObs)]
+    tvdata_test  = [tvdata[i] for i in testObs]
+    trueDupList_train = [ (i,j) for j in range(len(trainObs)) for i in range(j) if (tvdata_train[i]["modelID"] == tvdata_train[j]["modelID"])] 
+    trueDupList_test  = [ (i,j) for j in range(len(testObs))  for i in range(j) if (tvdata_test[i]["modelID"]  == tvdata_test[j]["modelID"])] 
+    
+    # print bootstrap duplicate rates
+    dupPercen_train = len(trueDupList_train)/len(tvdata_train)
+    dupPercen_test  = len(trueDupList_test) /len(tvdata_test)
+    print("train dup: %0.2f %%; test dup: %0.2f %%" % (dupPercen_train, dupPercen_test))
+    
+    return tvdata_train, tvdata_test, set(trueDupList_train), set(trueDupList_test)
+
+#-----------------------------------------------------------------------------
+# Model Words
+#-----------------------------------------------------------------------------
+def shingle(text: str, k: int):
+    shingle_set = []
+    for i in range(len(text) - k +1):
+        shingle_set.append(text[i:i+k])
+    return set(shingle_set)
+
+def shingling(tvdata: list, k: int):
+    
+    numTVs = len(tvdata)
+    k = 4
+    vocab = set()
+    shinglesDict = dict()
+
+    # access all titles
+    for i in range(numTVs):
+        titleProduct = tvdata[i]["title"]
+        seti = shingle(titleProduct, k)
+        shinglesDict[i] = seti
+        vocab = vocab.union(seti)
+    
+    vocab = list(vocab) # list of all shingles from titles
+
+    return vocab, shinglesDict
+
+def simJaccard(set1: set, set2: set):
+    
+    intersection = len(set1.intersection(set2))
+    union = (len(set1) + len(set2)) - intersection
+    
+    if union == 0:
+        similarity = float(intersection)
+    else: 
+        similarity = float(intersection) / union
+    return similarity
+
+def KVPairSimilarity(featuresMap1, featuresMap2):
+    
+    simKVPairs, comparisons = 0,0
+    q = 3
+    
+    for key1,val1 in featuresMap1.items():
+        
+        key_set1 = shingle(key1, q)
+        
+        for key2, val2 in featuresMap2.items():
+            
+            key_set2 = shingle(key2, q)
+            
+            if (simJaccard(key_set1,key_set2) > 0.8):
+                val_set1 = shingle(val1, q)
+                val_set2 = shingle(val2, q)
+                
+                simKVPairs += simJaccard(val_set1 ,val_set2)
+                comparisons += 1
+                
+    include = comparisons > 0
+    if include:
+        similarity = simKVPairs / comparisons
+    else:
+        similarity = 0
+        
+    return similarity, include
+
+def model_words(tvdata: list):
+    
+    numTVs = len(tvdata)
+    vocab, modelWordDict, counter = set(), dict(), 0
+    
+    #titles
+    for i in range(numTVs):
+        titleProduct = tvdata[i]["title"]
+        outputTitle = titleProduct.split()
+        titleMWs = set(outputTitle)
+        deleteList = [ i for i in titleMWs if len(i) < 2]
+        for j in range(len(deleteList)): titleMWs.discard(deleteList[j])
+        modelWordDict[i] = titleMWs
+        vocab = vocab.union(titleMWs)
+    
+    
+    # add model words from value part to i dictionary
+    for i in range(numTVs):
+        featuresValues = [str(tvdata[i]["featuresMap"][key]).replace(" ", "").replace('"',"inch") for key in tvdata[i]["featuresMap"].keys() ]
+        featuresSet = set(featuresValues).intersection(vocab)
+        counter += len(featuresSet)
+        modelWordDict[i] = modelWordDict[i].union(featuresSet)
+    
+    #remove one character items from vocab 
+    deleteList = [ i for i in vocab if len(i) < 2]
+    for j in range(len(deleteList)): vocab.discard(deleteList[j])
+    
+    # see whether model words from value part add something
+    print("num value intersections %d" %counter)
+    
+    return vocab, modelWordDict
+
+#-----------------------------------------------------------------------------
+# minHasing
+#-----------------------------------------------------------------------------
+
+def build_minhash_func(vocab_size: int, numhasfunc: int):
+    hashes = dict()
+    for i in range(numhasfunc):
+        hashex = list(range(vocab_size))
+        random.shuffle(hashex)
+        hashes[i] = np.array(hashex)
+    return hashes
+
+def min_hashing(tvdata: list, vocab: list, mwDict: dict, numhashfunc: int):
+    
+    numTVs = len(tvdata)
+    id_hashed,vector10 = dict(), dict()
+    
+    minhashes     = build_minhash_func(len(vocab), numhashfunc)
+    signatureDict = {i:[(math.inf) for h in range(numhashfunc) ] for i in range(numTVs)}
+    vector10      = {i:[1 if x in mwDict[i] else 0 for x in vocab] for i in range(numTVs)}
+    
+    # write signature dictionary using algorithm from slides
+    for row in range(len(vocab)):
+        for func in range(numhashfunc):
+            id_hashed[func] = np.argwhere(minhashes[func]==row)
+        for i in range(numTVs):
+            if vector10[i][row] == 1 :
+                for func in range(len(minhashes)):
+                    if signatureDict[i][func] > int(id_hashed[func]):
+                        signatureDict[i][func] = int(id_hashed[func])
+    
+    return signatureDict
+
+#-----------------------------------------------------------------------------
+# LSH
+#-----------------------------------------------------------------------------
+
+def lsh(tvdata: list, signatureDict: dict, bands: int, numhashfunc: int, true_duplicate_set: set()):
+    
+    numTVs = len(tvdata)
+    rows = numhashfunc / bands
+    tot_dupPairs = len(true_duplicate_set)
+    lshDict = collections.defaultdict(list)
+    
+    signaturePartitionDict = {i:[signatureDict[i][int(b*rows):int((b+1)*rows)] for b in range(bands)] for i in range(numTVs)}
+    
+    # LSH - compute hash of each band
+    for j in signaturePartitionDict.keys(): #use list + band number as hash 
+        for b in range(bands):
+            list_band = (tuple(signaturePartitionDict[j][b]),str(b)) #(tuple(lshPartitionDict[j][b]),str(b))
+            key = hash(list_band)
+            lshDict[key].append(j)
+    
+    #clean up candidates
+    candidatesList = [m for m in lshDict.values() if len(m) > 1]
+     
+    #calculate & print LSH metrics
+    pairs_Compared = [ pair for i in range(len(candidatesList)) for pair in set(itertools.combinations(candidatesList[i], 2)) ] 
+    trueDupPairs_found = [ pair for pair in pairs_Compared if (tvdata[pair[0]]["modelID"] == tvdata[pair[1]]["modelID"])] 
+    
+    numComparisons = len(set(pairs_Compared))
+    numDupPairs_found = len(set(trueDupPairs_found))
+    if (numDupPairs_found == 0):  numDupPairs_found = 0.00001 # still print F1* if measures if / 0
+        
+    pair_quality = numDupPairs_found / numComparisons             
+    pair_completeness = numDupPairs_found / tot_dupPairs    
+    f1star = 2 / ((1/pair_quality) + (1/pair_completeness))
+    resultsLSH = [pair_quality, pair_completeness, f1star]
+    numNoLSHComp = len(set(itertools.combinations(range(len(tvdata)), 2)))
+    compRed = numComparisons / numNoLSHComp
+    
+    print("PQ:        %6.6f " % pair_quality)
+    print("PC:        %6.6f " % pair_completeness)
+    print("F1*:       %6.6f " % f1star)
+    print("red comp:  %0.6f \n" % compRed)
+    
+    return candidatesList, resultsLSH, compRed
+
+#-----------------------------------------------------------------------------
+# Clustering and score calculation
+#-----------------------------------------------------------------------------
+
+def clustering(tvdata: list, candList: list, true_dup_set: set, signatureDict: dict, epsilon: float, weights: list, show: bool, nolsh: bool):
+    
+    #calculate distance matrix for clustering
+    distance_matrix = [[200000 for j in range(numTVs)] for i in range(numTVs)] # initilise everyting to "inf"
+    
+    if nolsh: # score calculation for without LSH
+        pairs = set(itertools.combinations(range(len(tvdata)), 2))
+    else:
+        pairs = set()
+        for i in range(len(candList)):
+            pairs = pairs.union(set(itertools.combinations(candList[i], 2)))
+            
+        for c in pairs:
+            if (tvdata[c[0]]["shop"] == tvdata[c[1]]["shop"]): # if same shop, then we do not check
+                continue
+            if ("brand" in tvdata[c[0]]["featuresMap"] and "brand" in tvdata[c[1]]["featuresMap"]):
+                if (tvdata[c[0]]["featuresMap"]["brand"] != tvdata[c[1]]["featuresMap"]["brand"]):
+                    continue
+            
+            numAgreeHash = sum([1 for l in range(numhashfunc) if signatureDict[c[0]][l] == signatureDict[c[1]][l]])
+            #simKVPairs, flag = KVPairSimilarity(tvdata[c[0]]["featuresMap"],tvdata[c[1]]["featuresMap"])
+            flag = False
+            if (flag):
+                distance_matrix[c[0]][c[1]] = 1 - weights[0]*(numAgreeHash / numhashfunc) #- weights[1]*simKVPairs
+                distance_matrix[c[1]][c[0]] = 1 - weights[0]*(numAgreeHash / numhashfunc) #- weights[1]*simKVPairs
+            else:
+                distance_matrix[c[0]][c[1]] = 1 - (numAgreeHash / numhashfunc)
+                distance_matrix[c[1]][c[0]] = 1 - (numAgreeHash / numhashfunc)
+    
+    #perform clustering         
+    agClustering = AgglomerativeClustering(affinity='precomputed', linkage='average', distance_threshold = epsilon, n_clusters = None)
+    clustersInd = agClustering.fit_predict(distance_matrix)
+    numClusters = clustersInd.max()
+    
+    clusters = [[] for i in range(numClusters)]
+    for i in range(numTVs):
+        clusters[clustersInd[i]-1].append(i)
+    
+    nonDup = sum([1 for i in range(numClusters) if len(clusters[i]) == 1])
+    numDupClusters = numClusters - nonDup 
+      
+    # calculate scores
+    dupPairsCand = set([ (pair[0],pair[1]) for i in range(numClusters) for pair in set(itertools.combinations(clusters[i], 2))])
+    tot_duplicatePairs = len(true_dup_set)
+    
+    # compute performance measures 
+    TP = len(dupPairsCand.intersection(true_dup_set))
+    FP = len(dupPairsCand) - TP
+    FN = len(true_dup_set) - len(dupPairsCand.intersection(true_dup_set))
+    
+    precision =  TP / (TP + FP)
+    recall = TP / (TP + FN)
+    if( precision == 0 and recall == 0 ): f1_measure = 0
+    else : f1_measure = 2 * precision * recall / (precision + recall)
+    
+    #print results
+    if (show):
+        print("clustered with %0.4f distance threshold" % epsilon)
+        print("# duplicate clusters found: %4d" % (numDupClusters))
+        print("true pairs: %d vs found: %d vs. FP: %d" % (tot_duplicatePairs,TP,FP)) 
+        print("precision: %6.5f " % precision )    
+        print("recall:    %6.5f " % recall )    
+        print("F1:        %6.5f \n" % f1_measure)
+    
+    results = [precision, recall, f1_measure]
+    
+    return results
+
+#-----------------------------------------------------------------------------
+# execute code
+#-----------------------------------------------------------------------------
+
+#parameters
+numhashfunc       = 200  # min hashing
+bands             = 100  # lsh
+num_resampling    = 3
+noLSH             = False  # show results for without LSH
+epsilonCandidates = [0.5,0.6,0.7]
+weightsCandidates = [[1,0]]
+
+#initilisation
+noshow, show = False, True
+results, resultsLSH = np.zeros((num_resampling,3)),np.zeros((num_resampling,3))
+compRed = np.zeros((num_resampling))
+resultsEpsilon = np.zeros((len(epsilonCandidates),len(weightsCandidates),3))
+
+# perform algorithm
+for i in range(num_resampling):
+    print("---------------------------------------------------------------------")
+    print("start bootstrap #%d" % int(i+1))
+    tvdata_train, tvdata_test, trueDupSet_train, trueDupSet_test = resample(tvdata)
+
+    #train
+    vocab, mwDict   = model_words(tvdata_train)
+    signDict        = min_hashing(tvdata_train, vocab, mwDict, numhashfunc)
+    candList, a, a  = lsh(tvdata_train,signDict, bands, numhashfunc, trueDupSet_train)
+    
+    # run for various values of epsilon
+    e = 0
+    for epsilon_cand in set(epsilonCandidates):
+        for weights_can in range(len(weightsCandidates)):
+            resultsEpsilon[e][weights_can]  = clustering(tvdata_train, candList, trueDupSet_train, signDict, epsilon_cand, weightsCandidates[weights_can], noshow, noLSH)
+        e += 1
+                
+    resultsEpsilon1   = resultsEpsilon[:][:][2]
+    w1,e1             = np.unravel_index(np.argmax(resultsEpsilon1),resultsEpsilon1.shape)
+    epsilon,weights   = epsilonCandidates[e1], weightsCandidates[w1]
+    
+    a                 = clustering(tvdata_train, candList, trueDupSet_train, signDict, epsilon, weights, show, noLSH)
+    print("best epsilon: %0.2f" % epsilon)
+    print("best weights: %0.2f %0.2f" % ( weights[0], weights[1] ))
+   
+    #test
+    print("- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -")
+    print("test results:")
+    noLSH = False
+    vocab, mwDict                       = model_words(tvdata_test)
+    signDict                            = min_hashing(tvdata_test, vocab, mwDict, numhashfunc)
+    candList, resultsLSH[i], compRed[i] = lsh(tvdata_test, signDict, bands, numhashfunc, trueDupSet_test)
+    results[i]                          = clustering(tvdata_test, candList, trueDupSet_test, signDict, epsilon, weights, show, noLSH)
+    
+#average over resamplings
+if( num_resampling > 1):
+    mean_results, mean_resultsLSH = np.mean(results,0), np.mean(resultsLSH,0)
+    mean_compRed = np.mean(compRed)
+    print("---------------------------------------------------------------------")
+    print("Average test results over #%d bootstraps (b: %d r: %d)" % (num_resampling, bands, numhashfunc/bands ))
+    print("PQ:        %6.5f "  % mean_resultsLSH[0])
+    print("PC:        %6.5f "  % mean_resultsLSH[1])
+    print("F1*:       %6.5f "  % mean_resultsLSH[2])
+
+    print("reduced comp: %.8f" % mean_compRed)
+    print("Precision: %6.5f "  % mean_results[0])
+    print("Recall:    %6.5f "  % mean_results[1])
+    print("F1:        %6.5f "  % mean_results[2])
